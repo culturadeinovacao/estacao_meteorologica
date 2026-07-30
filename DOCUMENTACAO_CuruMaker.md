@@ -1,446 +1,845 @@
-# CuruMaker — Guia do Colaborador
+# CuruMaker — Guia Técnico e do Colaborador
 
 > **Projeto:** Rede Ciência Cidadã · Parque Tecnológico de Santo André  
 > **Autor original:** Matheus Valadares Teixeira  
-> **Plataforma:** Arduino UNO R4 (compatível com R3 com ajustes)  
-> **Arquivo principal:** `Arduino_R4_test.ino`
+> **Plataforma principal:** Arduino UNO R4 WiFi  
+> **Arquivo principal:** `Arduino_R4_test.ino`  
+> **Comunicação:** Wi-Fi + MQTT  
+> **Broker de desenvolvimento:** HiveMQ público
 
 ---
 
 ## Índice
 
-1. [Visão Geral](#1-visão-geral)
-2. [Configuração e Instalação](#2-configuração-e-instalação)
-3. [Exemplos de Uso](#3-exemplos-de-uso)
-4. [Referência da API](#4-referência-da-api)
-5. [Armadilhas Comuns e FAQ](#5-armadilhas-comuns-e-faq)
-6. [Solução de Problemas](#6-solução-de-problemas)
-7. [Sugestões de Melhoria para Contribuidores](#7-sugestões-de-melhoria-para-contribuidores)
+1. [Visão geral](#1-visão-geral)
+2. [Arquitetura do firmware](#2-arquitetura-do-firmware)
+3. [Configuração e instalação](#3-configuração-e-instalação)
+4. [Formato dos dados MQTT](#4-formato-dos-dados-mqtt)
+5. [Referência das funções](#5-referência-das-funções)
+6. [Intervalos de execução](#6-intervalos-de-execução)
+7. [Exemplos de uso](#7-exemplos-de-uso)
+8. [Armadilhas comuns e FAQ](#8-armadilhas-comuns-e-faq)
+9. [Solução de problemas](#9-solução-de-problemas)
+10. [Boas práticas e melhorias futuras](#10-boas-práticas-e-melhorias-futuras)
 
 ---
 
-## 1. Visão Geral
+## 1. Visão geral
 
-### O que este código faz
+### 1.1 O que o firmware faz
 
-Este firmware transforma um Arduino em uma **estação meteorológica de baixo custo**, capaz de medir e exibir em tempo real:
+O firmware transforma um **Arduino UNO R4 WiFi** em uma estação ambiental conectada. O sistema mede quatro variáveis, apresenta os valores localmente em um display OLED e envia as leituras para um broker MQTT.
 
-| Grandeza             | Sensor          | Saída          |
-|----------------------|-----------------|----------------|
-| Temperatura do ar    | DHT11           | °C (1 decimal) |
-| Umidade relativa do ar | DHT11         | % (1 decimal)  |
-| Umidade do solo      | Capacitivo + A0 | % (inteiro)    |
-| Luminosidade         | GY-30 / BH1750  | lux (inteiro)  |
+| Grandeza | Sensor | Unidade / formato |
+|---|---|---|
+| Temperatura do ar | DHT11 | °C, uma casa decimal |
+| Umidade relativa do ar | DHT11 | %, uma casa decimal |
+| Umidade do solo | Sensor capacitivo | %, valor inteiro |
+| Leitura bruta do solo | Sensor capacitivo | Valor do ADC |
+| Luminosidade | GY-30 / BH1750 | lux |
 
-Todos os dados são exibidos em um **display OLED 128×64** e transmitidos pela **porta serial** (para log ou integração futura).
+A versão conectada acrescenta:
 
-### Por que este código existe
+- conexão Wi-Fi usando `WiFiS3`;
+- comunicação MQTT usando `PubSubClient`;
+- publicação das leituras em JSON;
+- reconexão automática ao Wi-Fi e ao broker;
+- exibição do estado `ONLINE` ou `OFFLINE` no OLED;
+- tratamento de dados inválidos sem convertê-los em medidas falsas;
+- temporização não bloqueante baseada em `millis()`.
 
-O projeto faz parte da **Rede Ciência Cidadã**, uma iniciativa de ciência participativa que distribui estações meteorológicas maker para escolas e espaços públicos. O objetivo é coletar dados ambientais hiper-locais — algo que as redes meteorológicas oficiais raramente fornecem em nível de bairro.
+### 1.2 Finalidade científica e pedagógica
 
-O código foi projetado com simplicidade intencional para ser replicável por educadores e estudantes com pouca experiência em eletrônica. Contribuidores são encorajados a expandir funcionalidades (conectividade Wi-Fi, armazenamento em SD card, envio para APIs) sem quebrar essa acessibilidade.
+O CuruMaker integra a Rede Ciência Cidadã e busca facilitar a produção de dados ambientais hiperlocais. Em escolas, laboratórios e espaços públicos, o equipamento pode apoiar investigações sobre microclima, conforto térmico, iluminação, umidade do solo, comportamento de plantas, variação diária e diferenças ambientais entre bairros.
 
-### Fluxo de execução resumido
+A conectividade MQTT transforma cada estação em um nó de uma rede de observação. Em vez de apenas exibir uma medida instantânea, o sistema pode alimentar séries temporais, dashboards, alertas, atividades de análise estatística e comparações espaciais entre diferentes unidades.
 
-```
+### 1.3 Limites da versão atual
+
+O firmware não implementa armazenamento local, timestamp absoluto, criptografia TLS ou autenticação MQTT. O broker público deve ser considerado um ambiente de teste e demonstração. Para coleta institucional ou científica de longa duração, recomenda-se um broker privado e uma estratégia explícita de identificação, tempo, integridade e retenção dos dados.
+
+---
+
+## 2. Arquitetura do firmware
+
+### 2.1 Fluxo geral
+
+```text
 setup()
-  └─ Inicializa Serial, Wire (I2C), OLED, DHT11, BH1750
+  ├─ Inicializa Serial
+  ├─ Inicializa barramento I2C
+  ├─ Inicializa OLED
+  ├─ Inicializa DHT11
+  ├─ Inicializa BH1750
+  ├─ Configura o cliente MQTT
+  └─ Tenta conectar ao Wi-Fi
 
-loop() — a cada 2 segundos:
-  ├─ Lê temperatura e umidade do ar (DHT11)
-  ├─ Lê luminosidade (BH1750 via I2C)
-  ├─ Lê umidade do solo (ADC + mapeamento linear)
-  ├─ Valida leituras (isnan check)
-  ├─ Atualiza display OLED
-  └─ Aguarda 2000 ms
+loop()
+  ├─ Verifica e recupera a conexão Wi-Fi
+  ├─ Verifica e recupera a conexão MQTT
+  ├─ Executa mqttClient.loop()
+  └─ Quando INTERVALO_LEITURA é atingido:
+       ├─ Lê DHT11
+       ├─ Lê BH1750
+       ├─ Lê sensor de solo
+       ├─ Valida os dados
+       ├─ Atualiza o OLED
+       └─ Publica o JSON no MQTT
 ```
 
----
+### 2.2 Caminho dos dados
 
-## 2. Configuração e Instalação
-
-### 2.1 Pré-requisitos de hardware
-
-| Componente                   | Modelo testado       | Interface | Pino / Endereço |
-|------------------------------|----------------------|-----------|-----------------|
-| Microcontrolador             | Arduino UNO R4       | —         | —               |
-| Sensor de temperatura/umidade| DHT11                | Digital   | Pino 2          |
-| Sensor de luminosidade       | GY-30 (BH1750)       | I2C       | 0x23 (padrão)   |
-| Display OLED                 | SSD1306 128×64       | I2C       | 0x3C (padrão)   |
-| Sensor de umidade do solo    | Capacitivo (genérico)| Analógico | A0              |
-
-> **Atenção:** Módulos com endereço I2C diferente (ex.: display em `0x3D`) exigem alteração no código. Ver [Solução de Problemas](#6-solução-de-problemas).
-
-### 2.2 Diagrama de conexões
-
-```
-Arduino         DHT11
-D2 ──────────── DATA
-5V ──────────── VCC
-GND ─────────── GND
-
-Arduino         SSD1306 (OLED)     GY-30 (BH1750)
-A4 (SDA) ─────── SDA ──────────── SDA
-A5 (SCL) ─────── SCL ──────────── SCL
-3.3V ──────────── VCC ──────────── VCC
-GND ─────────── GND ──────────── GND
-
-Arduino         Sensor de Solo (Capacitivo)
-A0 ──────────── AOUT
-5V ──────────── VCC
-GND ─────────── GND
+```text
+Sensores
+   │
+   ▼
+Leitura e validação
+   │
+   ├──► OLED
+   ├──► Monitor Serial
+   └──► JSON ──► MQTT ──► HiveMQ ──► aplicações consumidoras
 ```
 
-> No Arduino UNO R4 WiFi/Minima, os pinos I2C permanecem em A4/A5 para compatibilidade com shields R3.
+As aplicações consumidoras podem incluir Node-RED, n8n, Python, bancos de dados de séries temporais, Grafana, aplicativos web e outras plataformas compatíveis com MQTT.
 
-### 2.3 Dependências de software
+### 2.3 Estratégia de temporização
 
-Instale as seguintes bibliotecas pela **Arduino IDE** (Sketch → Incluir Biblioteca → Gerenciar Bibliotecas):
-
-| Biblioteca         | Versão mínima testada | Instalação (nome exato no gerenciador) |
-|--------------------|-----------------------|----------------------------------------|
-| `Adafruit GFX`     | 1.11.x                | `Adafruit GFX Library`                 |
-| `Adafruit SSD1306` | 2.5.x                 | `Adafruit SSD1306`                     |
-| `DHT sensor library` | 1.4.x               | `DHT sensor library` (by Adafruit)     |
-| `BH1750`           | 1.3.x                 | `BH1750` (by Christopher Laws)         |
-| `Wire`             | —                     | Nativa do Arduino (não instalar)       |
-
-### 2.4 Calibração do sensor de solo (obrigatória)
-
-O sensor capacitivo de solo **precisa ser calibrado para o seu hardware específico** antes do primeiro uso.
-
-**Passo a passo:**
-
-1. Faça o upload do código e abra o **Monitor Serial** (9600 baud).
-2. Deixe o sensor suspenso no ar por 30 segundos e anote o valor impresso para `soloRaw`.
-3. Mergulhe o sensor em um copo de água até a linha de marcação e anote o novo valor.
-4. Edite as constantes no início do arquivo:
+O firmware não utiliza um `delay(2000)` como temporizador principal. Em vez disso, compara o valor atual de `millis()` com o instante da última leitura:
 
 ```cpp
-const int VALOR_SECO  = 1020;  // ← substitua pelo valor lido no ar
-const int VALOR_UMIDO = 410;   // ← substitua pelo valor lido na água
+unsigned long agora = millis();
+
+if (agora - ultimaLeitura < INTERVALO_LEITURA) {
+  return;
+}
+
+ultimaLeitura = agora;
 ```
 
-> Valores fora do intervalo `[0, 100]` são automaticamente limitados pela função `constrain()`, mas leituras fora da faixa calibrada indicam necessidade de recalibração.
+Essa abordagem permite que o programa continue verificando as conexões enquanto aguarda o próximo ciclo de sensores. Isso é importante porque o cliente MQTT precisa executar `mqttClient.loop()` periodicamente para manter a sessão ativa.
 
 ---
 
-## 3. Exemplos de Uso
+## 3. Configuração e instalação
 
-### Exemplo 1 — Operação básica (sem alterações)
+### 3.1 Hardware
 
-Faça o upload do código com as configurações padrão e abra o Monitor Serial. Você verá as leituras a cada 2 segundos:
+| Componente | Modelo | Interface | Pino / endereço |
+|---|---|---|---|
+| Microcontrolador | Arduino UNO R4 WiFi | Wi-Fi / GPIO / I2C / ADC | — |
+| Temperatura e umidade do ar | DHT11 | Digital | D2 |
+| Luminosidade | GY-30 / BH1750 | I2C | `0x23` por padrão |
+| Display | SSD1306 128×64 | I2C | `0x3C` por padrão |
+| Umidade do solo | Capacitivo | Analógica | A0 |
 
-**Saída esperada no Serial:**
+A versão atual depende da conectividade integrada do **UNO R4 WiFi**. O UNO R4 Minima pode executar a parte de sensores e OLED, mas não a comunicação Wi-Fi do firmware sem hardware adicional.
+
+### 3.2 Diagrama de conexões
+
+```text
+Arduino UNO R4 WiFi       DHT11
+D2 ────────────────────── DATA
+5V ────────────────────── VCC
+GND ───────────────────── GND
+
+Arduino UNO R4 WiFi       SSD1306              GY-30 / BH1750
+A4 / SDA ──────────────── SDA ──────────────── SDA
+A5 / SCL ──────────────── SCL ──────────────── SCL
+3.3V ou 5V* ───────────── VCC ──────────────── VCC
+GND ───────────────────── GND ──────────────── GND
+
+Arduino UNO R4 WiFi       Sensor capacitivo de solo
+A0 ────────────────────── AOUT
+5V* ───────────────────── VCC
+GND ───────────────────── GND
 ```
+
+`*` Confirme a tensão aceita pelos módulos específicos utilizados. Módulos visualmente semelhantes podem empregar reguladores e níveis lógicos diferentes.
+
+### 3.3 Bibliotecas
+
+Instale pela Arduino IDE:
+
+| Biblioteca | Finalidade | Instalação |
+|---|---|---|
+| `Adafruit GFX Library` | Primitivas gráficas | Gerenciador de Bibliotecas |
+| `Adafruit SSD1306` | Controle do OLED | Gerenciador de Bibliotecas |
+| `DHT sensor library` | Leitura do DHT11 | Gerenciador de Bibliotecas |
+| `Adafruit Unified Sensor` | Dependência do DHT | Gerenciador de Bibliotecas |
+| `BH1750` | Leitura de luminosidade | Gerenciador de Bibliotecas |
+| `PubSubClient` | Cliente MQTT | Gerenciador de Bibliotecas |
+| `Wire` | Comunicação I2C | Nativa |
+| `WiFiS3` | Wi-Fi do UNO R4 WiFi | Pacote da placa |
+
+### 3.4 Configuração do Wi-Fi
+
+Edite:
+
+```cpp
+const char* WIFI_SSID = "NOME_DO_WIFI";
+const char* WIFI_PASSWORD = "SENHA_DO_WIFI";
+```
+
+O firmware tenta se conectar durante a inicialização. Caso a conexão falhe, a estação continua realizando as leituras e exibindo os valores localmente. Novas tentativas são realizadas durante o `loop()`.
+
+> Para um repositório público, não envie credenciais reais ao Git. Uma melhoria recomendada é mover esses valores para `arduino_secrets.h` e ignorar esse arquivo com `.gitignore`.
+
+### 3.5 Configuração do broker MQTT
+
+```cpp
+const char* MQTT_BROKER = "broker.hivemq.com";
+const uint16_t MQTT_PORT = 1883;
+```
+
+A porta `1883` estabelece uma conexão MQTT sem TLS. O broker público da HiveMQ não exige usuário e senha para testes.
+
+### 3.6 Tópico e identificador da estação
+
+```cpp
+const char* MQTT_TOPIC =
+  "rede-ciencia-cidada/santo-andre/estacao-001/dados";
+
+const char* MQTT_CLIENT_ID =
+  "estacao-maker-santo-andre-001";
+```
+
+O tópico representa a posição lógica da estação dentro da rede. Uma convenção recomendada é:
+
+```text
+rede-ciencia-cidada/<municipio>/<estacao>/dados
+```
+
+Exemplos:
+
+```text
+rede-ciencia-cidada/santo-andre/estacao-001/dados
+rede-ciencia-cidada/santo-andre/estacao-002/dados
+rede-ciencia-cidada/santo-andre/estacao-parque-central/dados
+```
+
+O `MQTT_CLIENT_ID` precisa ser único entre conexões simultâneas. Quando dois dispositivos se conectam com o mesmo ID, o broker geralmente encerra a conexão anterior.
+
+### 3.7 Retenção da última mensagem
+
+```cpp
+const bool MQTT_RETAIN = true;
+```
+
+Com `retain = true`, o broker armazena a última mensagem do tópico e a entrega imediatamente a novos assinantes. Isso é útil para dashboards, pois permite mostrar a leitura mais recente sem esperar o próximo ciclo.
+
+A mensagem retida não constitui um histórico. Para séries temporais, um consumidor deve registrar cada publicação em um banco de dados ou arquivo.
+
+### 3.8 Calibração do sensor de solo
+
+O sensor de solo deve ser calibrado para o conjunto real de placa, alimentação, cabos e sensor.
+
+```cpp
+const int VALOR_SECO = 1020;
+const int VALOR_UMIDO = 410;
+```
+
+Procedimento sugerido:
+
+1. Mostre temporariamente `soloRaw` no Monitor Serial.
+2. Registre várias leituras na condição adotada como seca.
+3. Registre várias leituras na condição adotada como úmida.
+4. Utilize valores representativos, preferencialmente médias ou medianas.
+5. Atualize `VALOR_SECO` e `VALOR_UMIDO`.
+6. Repita a calibração caso a alimentação, o sensor ou o substrato sejam alterados.
+
+O cálculo utilizado é:
+
+```cpp
+int umidadeSolo = map(
+  soloRaw,
+  VALOR_SECO,
+  VALOR_UMIDO,
+  0,
+  100
+);
+
+umidadeSolo = constrain(umidadeSolo, 0, 100);
+```
+
+A porcentagem resultante é uma escala calibrada para o projeto, não uma medição universal de teor volumétrico de água no solo.
+
+---
+
+## 4. Formato dos dados MQTT
+
+### 4.1 Tópico padrão
+
+```text
+rede-ciencia-cidada/santo-andre/estacao-001/dados
+```
+
+### 4.2 Payload JSON
+
+```json
+{
+  "temperatura_ar_c": 24.7,
+  "umidade_ar_pct": 61.3,
+  "umidade_solo_pct": 52,
+  "umidade_solo_raw": 702,
+  "luminosidade_lux": 1384.0
+}
+```
+
+### 4.3 Dicionário de campos
+
+| Campo | Tipo esperado | Unidade | Origem |
+|---|---|---|---|
+| `temperatura_ar_c` | Número ou `null` | °C | DHT11 |
+| `umidade_ar_pct` | Número ou `null` | % | DHT11 |
+| `umidade_solo_pct` | Inteiro | % calibrada | Sensor capacitivo |
+| `umidade_solo_raw` | Inteiro | Valor ADC | Sensor capacitivo |
+| `luminosidade_lux` | Número ou `null` | lux | BH1750 |
+
+A inclusão de `umidade_solo_raw` permite auditar a calibração e investigar saturações em 0% ou 100%.
+
+### 4.4 Leituras inválidas
+
+Quando o DHT11 falha, o firmware produz:
+
+```json
+{
+  "temperatura_ar_c": null,
+  "umidade_ar_pct": null,
+  "umidade_solo_pct": 52,
+  "umidade_solo_raw": 702,
+  "luminosidade_lux": 1384.0
+}
+```
+
+Quando o BH1750 falha, `luminosidade_lux` é enviado como `null`.
+
+O uso de `null` preserva a diferença entre “o sensor mediu zero” e “não houve medida válida”. Essa distinção é essencial para análise de dados e para impedir que falhas técnicas contaminem médias, mínimos e gráficos.
+
+### 4.5 Assinatura com curingas
+
+Para receber todas as estações de Santo André:
+
+```text
+rede-ciencia-cidada/santo-andre/+/dados
+```
+
+Para receber todas as mensagens abaixo do projeto:
+
+```text
+rede-ciencia-cidada/#
+```
+
+Curingas amplos são úteis para desenvolvimento, mas consumidores de produção devem assinar apenas os ramos necessários.
+
+---
+
+## 5. Referência das funções
+
+### 5.1 `setup()`
+
+Executada uma vez após ligar ou reiniciar a placa.
+
+Responsabilidades:
+
+1. inicia o Monitor Serial;
+2. inicia o barramento I2C;
+3. inicia o display OLED;
+4. inicia o DHT11;
+5. inicia o BH1750;
+6. configura broker, buffer e keep-alive do MQTT;
+7. inicia a conexão Wi-Fi;
+8. prepara a primeira leitura imediata.
+
+Trechos relevantes:
+
+```cpp
+mqttClient.setServer(MQTT_BROKER, MQTT_PORT);
+mqttClient.setBufferSize(256);
+mqttClient.setKeepAlive(30);
+```
+
+O buffer de `256` bytes é suficiente para o JSON atual. Caso novos campos sejam adicionados, verifique se o payload continua cabendo nesse limite.
+
+### 5.2 `iniciarWiFi()`
+
+Realiza a tentativa inicial de conexão à rede.
+
+```cpp
+void iniciarWiFi();
+```
+
+A função aguarda por até aproximadamente 15 segundos. Se não conseguir conectar, registra a falha no Serial e permite que a estação continue operando offline.
+
+### 5.3 `manterWiFiConectado()`
+
+Verifica o estado da rede e inicia uma nova tentativa quando necessário.
+
+```cpp
+void manterWiFiConectado();
+```
+
+A função usa `INTERVALO_WIFI` para impedir tentativas contínuas e bloqueantes.
+
+### 5.4 `manterMQTTConectado()`
+
+Mantém a sessão MQTT e executa o processamento interno do cliente.
+
+```cpp
+void manterMQTTConectado();
+```
+
+Comportamento:
+
+- retorna imediatamente se o Wi-Fi estiver desconectado;
+- chama `mqttClient.loop()` quando a sessão está ativa;
+- tenta reconectar após `INTERVALO_MQTT` quando a sessão está inativa;
+- usa `MQTT_CLIENT_ID` durante a conexão.
+
+> `INTERVALO_MQTT` controla tentativas de reconexão, não a frequência de publicação.
+
+### 5.5 `publicarDadosMQTT(...)`
+
+Monta o JSON e o envia ao tópico configurado.
+
+```cpp
+void publicarDadosMQTT(
+  float temperatura,
+  float umidadeAr,
+  bool dhtValido,
+  int umidadeSolo,
+  int soloRaw,
+  float luminosidade,
+  bool luminosidadeValida
+);
+```
+
+A função:
+
+- verifica se o MQTT está conectado;
+- reserva memória para a `String`;
+- inclui números válidos ou `null`;
+- publica com a opção `MQTT_RETAIN`;
+- registra sucesso ou falha no Monitor Serial.
+
+### 5.6 `loop()`
+
+Executada continuamente.
+
+O `loop()` está dividido em duas camadas temporais:
+
+1. manutenção contínua das conexões;
+2. ciclo periódico de leitura e publicação.
+
+```cpp
+void loop() {
+  manterWiFiConectado();
+  manterMQTTConectado();
+
+  unsigned long agora = millis();
+
+  if (agora - ultimaLeitura < INTERVALO_LEITURA) {
+    return;
+  }
+
+  ultimaLeitura = agora;
+
+  // Leituras, OLED e publicação MQTT
+}
+```
+
+Essa estrutura evita bloquear a comunicação durante a espera entre amostras.
+
+---
+
+## 6. Intervalos de execução
+
+### 6.1 Intervalo de leitura e publicação
+
+A constante que controla a frequência das leituras e do envio MQTT é:
+
+```cpp
+const unsigned long INTERVALO_LEITURA = 2000;
+```
+
+O valor é dado em milissegundos.
+
+| Intervalo desejado | Valor |
+|---|---:|
+| 2 segundos | `2000` |
+| 5 segundos | `5000` |
+| 10 segundos | `10000` |
+| 30 segundos | `30000` |
+| 1 minuto | `60000` |
+| 5 minutos | `300000` |
+
+No firmware atual, uma única constante controla três ações:
+
+- leitura dos sensores;
+- atualização do display;
+- publicação MQTT.
+
+Portanto, alterar `INTERVALO_LEITURA` modifica todo o ciclo de aquisição.
+
+### 6.2 Intervalo de reconexão Wi-Fi
+
+```cpp
+const unsigned long INTERVALO_WIFI = 10000;
+```
+
+Define quanto tempo o firmware aguarda entre tentativas de recuperar o Wi-Fi.
+
+### 6.3 Intervalo de reconexão MQTT
+
+```cpp
+const unsigned long INTERVALO_MQTT = 5000;
+```
+
+Define quanto tempo o firmware aguarda entre tentativas de recuperar a sessão MQTT.
+
+Essa constante não controla o envio regular das leituras.
+
+### 6.4 Separando leitura, OLED e publicação
+
+Em aplicações reais, pode ser útil ler o DHT11 a cada 2 segundos, atualizar o display a cada 2 segundos e publicar apenas a cada 30 segundos. Para isso, crie temporizadores independentes:
+
+```cpp
+const unsigned long INTERVALO_LEITURA = 2000;
+const unsigned long INTERVALO_ENVIO_MQTT = 30000;
+
+unsigned long ultimaLeitura = 0;
+unsigned long ultimoEnvioMQTT = 0;
+```
+
+Depois, separe as verificações no `loop()`. Essa alteração reduz tráfego e armazenamento sem diminuir a responsividade local.
+
+---
+
+## 7. Exemplos de uso
+
+### 7.1 Teste com cliente MQTT
+
+Conecte um cliente MQTT com os seguintes parâmetros:
+
+```text
+Host: broker.hivemq.com
+Porta: 1883
+Usuário: não utilizado
+Senha: não utilizada
+```
+
+Assine:
+
+```text
+rede-ciencia-cidada/santo-andre/estacao-001/dados
+```
+
+A cada ciclo, uma mensagem JSON deverá aparecer.
+
+### 7.2 Alterar o intervalo para 30 segundos
+
+```cpp
+const unsigned long INTERVALO_LEITURA = 30000;
+```
+
+Isso fará com que sensores, OLED e MQTT sejam atualizados a cada 30 segundos.
+
+### 7.3 Adicionar uma nova estação
+
+Na segunda placa:
+
+```cpp
+const char* MQTT_TOPIC =
+  "rede-ciencia-cidada/santo-andre/estacao-002/dados";
+
+const char* MQTT_CLIENT_ID =
+  "estacao-maker-santo-andre-002";
+```
+
+Não basta alterar apenas o tópico. O ID do cliente também deve ser único.
+
+### 7.4 Consumir várias estações
+
+Assine o tópico curinga:
+
+```text
+rede-ciencia-cidada/santo-andre/+/dados
+```
+
+A aplicação consumidora pode extrair o identificador da estação do próprio tópico.
+
+### 7.5 Log serial esperado
+
+```text
 GY-30 inicializado com sucesso.
-```
-*(Leituras de erro do DHT11, se houver, aparecerão aqui também)*
-
-**Saída no display OLED:**
-```
-   MONITOR DE SENSORES
-────────────────────────
-Temp. Ar: 24.5 C
-Umid. Ar: 68.0 %
-Umid. Solo: 42 %
-Luminos.: 312 lx
+Conectando ao Wi-Fi: NOME_DO_WIFI
+Wi-Fi conectado com sucesso!
+Endereco IP: 192.168.0.120
+Conectando ao broker MQTT... conectado!
+Dados publicados no MQTT:
+{"temperatura_ar_c":24.7,"umidade_ar_pct":61.3,"umidade_solo_pct":52,"umidade_solo_raw":702,"luminosidade_lux":1384.0}
 ```
 
 ---
 
-### Exemplo 2 — Adicionando log detalhado no Serial
+## 8. Armadilhas comuns e FAQ
 
-Para depuração ou registro em CSV, adicione as seguintes linhas ao final do `loop()`, após o bloco de atualização do OLED:
+### 8.1 O MQTT conecta e desconecta repetidamente
+
+Verifique se outra placa, programa ou teste está usando o mesmo `MQTT_CLIENT_ID`. IDs duplicados podem provocar uma disputa em que cada conexão derruba a outra.
+
+Use um identificador único por estação.
+
+### 8.2 O display mostra `MQTT: OFFLINE`, mas os sensores funcionam
+
+Isso significa que a aquisição local está ativa, porém o Wi-Fi ou o broker não está disponível. Verifique o Monitor Serial para distinguir:
+
+- falha de conexão Wi-Fi;
+- falha de resolução do endereço do broker;
+- rejeição ou queda da sessão MQTT.
+
+### 8.3 Alterei `INTERVALO_MQTT`, mas a frequência de publicação não mudou
+
+Esse valor controla somente a espera entre tentativas de reconexão.
+
+Altere:
 
 ```cpp
-// Adicionar no final de loop(), antes de delay(2000)
-Serial.print("TEMP:");
-Serial.print(tempAr, 1);
-Serial.print(",UMID_AR:");
-Serial.print(umidadeAr, 1);
-Serial.print(",UMID_SOLO:");
-Serial.print(umidadeSolo);
-Serial.print(",LUX:");
-Serial.println(lux, 0);
+const unsigned long INTERVALO_LEITURA = 2000;
 ```
 
-**Saída no Serial:**
+### 8.4 O DHT11 retorna falhas frequentes
+
+Possíveis causas:
+
+- intervalo de leitura inadequado;
+- fiação longa ou instável;
+- ausência de resistor pull-up quando necessário;
+- alimentação incorreta;
+- sensor com defeito;
+- biblioteca ou modelo configurado incorretamente.
+
+Mantenha `INTERVALO_LEITURA` em pelo menos 2 segundos na configuração atual, a menos que leitura e publicação sejam separadas em temporizadores diferentes.
+
+### 8.5 O JSON contém `null`
+
+`null` indica que não houve leitura válida naquele ciclo. Não é uma falha do formato JSON. O consumidor deve tratar esse valor como dado ausente e não como zero.
+
+### 8.6 A mensagem não aparece imediatamente ao assinar
+
+Com `MQTT_RETAIN = true`, a última mensagem válida normalmente é entregue imediatamente. Se isso não acontecer, verifique:
+
+- se houve ao menos uma publicação bem-sucedida;
+- se o tópico do cliente é exatamente o mesmo;
+- se o firmware foi alterado para `MQTT_RETAIN = false`;
+- se o cliente está usando uma sessão ou filtro diferente.
+
+### 8.7 Posso publicar cada sensor em um tópico separado?
+
+Sim. Por exemplo:
+
+```text
+rede-ciencia-cidada/santo-andre/estacao-001/temperatura
+rede-ciencia-cidada/santo-andre/estacao-001/umidade-ar
+rede-ciencia-cidada/santo-andre/estacao-001/umidade-solo
+rede-ciencia-cidada/santo-andre/estacao-001/luminosidade
 ```
-TEMP:24.5,UMID_AR:68.0,UMID_SOLO:42,LUX:312
-TEMP:24.6,UMID_AR:67.8,UMID_SOLO:43,LUX:305
-```
 
-Esse formato facilita a importação em planilhas ou sistemas de monitoramento como o **Node-RED** e o **Grafana** via serial-to-MQTT bridge.
+A mensagem única em JSON reduz o número de publicações e mantém as leituras de um ciclo agrupadas. Tópicos separados facilitam consumidores muito simples. A escolha depende da arquitetura do sistema.
 
----
+### 8.8 O OLED não inicializa
 
-### Exemplo 3 — Ajustando o intervalo de leitura e habilitando alertas
-
-Para aplicações que precisam de mais dados por minuto (ex.: experimento em sala de aula) ou de alertas visuais, modifique o `loop()`:
+O endereço mais comum é `0x3C`, mas alguns displays usam `0x3D`. Utilize um scanner I2C e altere:
 
 ```cpp
-// Troque o delay fixo por uma constante configurável no topo do arquivo:
-#define INTERVALO_MS 2000  // DHT11 requer mínimo 2000 ms
-
-// No loop():
-if (umidadeSolo < 20) {
-  // Alerta visual: pisca a tela 3 vezes se solo muito seco
-  for (int i = 0; i < 3; i++) {
-    display.invertDisplay(true);
-    delay(200);
-    display.invertDisplay(false);
-    delay(200);
-  }
-}
-
-delay(INTERVALO_MS);
+display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
 ```
 
-> **Atenção:** O DHT11 tem taxa de amostragem máxima de 1 Hz (uma leitura por segundo). Valores abaixo de `1000 ms` no delay causarão leituras `NaN` consecutivas. Use o DHT22 se precisar de leituras mais frequentes.
+### 8.9 O BH1750 retorna erro ou zero lux
 
----
-
-## 4. Referência da API
-
-Este firmware não expõe uma API pública no sentido convencional — toda a lógica está contida nas duas funções padrão do Arduino. A documentação abaixo descreve os pontos de extensão mais relevantes para contribuidores.
-
----
-
-### `setup()` — Inicialização do sistema
-
-**Descrição:** Executada uma única vez ao ligar o Arduino. Inicializa todos os periféricos na seguinte ordem: Serial → I2C (Wire) → OLED → DHT11 → BH1750.
-
-**Comportamento em falha:**
-
-| Falha                        | Comportamento                                           |
-|------------------------------|---------------------------------------------------------|
-| Display OLED não encontrado  | Trava em loop infinito (`for(;;)`) + mensagem no Serial |
-| BH1750 não encontrado        | Mensagem de erro no Serial, execução continua          |
-| DHT11 com leitura inválida   | Detectado no `loop()`, não interrompe o `setup()`      |
-
-**Variáveis configuradas nesta função:**
-
-```cpp
-display.setTextColor(SSD1306_WHITE);  // Cor fixa para display monocromático
-display.setTextSize(1);               // Tamanho de fonte padrão (6×8 px por caractere)
-```
-
----
-
-### `loop()` — Ciclo principal de leitura e exibição
-
-**Descrição:** Executada continuamente. A cada iteração: lê os três sensores, valida os dados, atualiza o OLED e aguarda 2 segundos.
-
-**Variáveis locais relevantes:**
-
-| Variável      | Tipo    | Fonte                   | Descrição                                  |
-|---------------|---------|-------------------------|--------------------------------------------|
-| `umidadeAr`   | `float` | `dht.readHumidity()`    | Umidade relativa do ar em %                |
-| `tempAr`      | `float` | `dht.readTemperature()` | Temperatura do ar em °C                    |
-| `lux`         | `float` | `lightMeter.readLightLevel()` | Luminosidade em lux                  |
-| `soloRaw`     | `int`   | `analogRead(SOIL_PIN)`  | Valor ADC bruto (0–1023)                   |
-| `umidadeSolo` | `int`   | `map()` + `constrain()` | Umidade do solo mapeada para 0–100%        |
-
-**Tratamento de erro do DHT11:**
-
-```cpp
-if (isnan(umidadeAr) || isnan(tempAr)) {
-    // Valores são zerados — o display mostrará 0.0 em vez de NaN
-    tempAr    = 0;
-    umidadeAr = 0;
-}
-```
-
-> **Nota para contribuidores:** Zerar os valores em caso de erro pode ser enganoso para o usuário final (0 °C e 0% são valores plausíveis). Considere exibir `"ERR"` no display nesses casos.
-
----
-
-### Constantes e pinos configuráveis
-
-```cpp
-#define DHTPIN        2       // Pino digital do DHT11
-#define DHTTYPE       DHT11   // Modelo: DHT11 ou DHT22
-#define SCREEN_WIDTH  128     // Largura do OLED em pixels
-#define SCREEN_HEIGHT 64      // Altura do OLED em pixels
-#define OLED_RESET    -1      // -1 = compartilha reset com o Arduino
-
-const int SOIL_PIN    = A0;   // Pino analógico do sensor de solo
-const int VALOR_SECO  = 1020; // Valor ADC no ar seco (calibrar!)
-const int VALOR_UMIDO = 410;  // Valor ADC na água (calibrar!)
-```
-
----
-
-## 5. Armadilhas Comuns e FAQ
-
-### ❓ O display OLED não acende e o código trava
-
-**Causa mais comum:** O endereço I2C do display não é `0x3C`. Alguns módulos usam `0x3D`.
-
-**Diagnóstico:** Faça o upload do seguinte sketch de escaneamento I2C e verifique o endereço no Serial:
-
-```cpp
-#include <Wire.h>
-void setup() {
-  Wire.begin();
-  Serial.begin(9600);
-  for (byte addr = 1; addr < 127; addr++) {
-    Wire.beginTransmission(addr);
-    if (Wire.endTransmission() == 0)
-      Serial.println(addr, HEX);
-  }
-}
-void loop() {}
-```
-
-**Solução:** Altere `0x3C` para o endereço encontrado na linha:
-```cpp
-display.begin(SSD1306_SWITCHCAPVCC, 0x3C)  // ← altere aqui
-```
-
----
-
-### ❓ O sensor de solo sempre mostra 0% ou 100%
-
-**Causa:** Os valores `VALOR_SECO` e `VALOR_UMIDO` não foram calibrados para o hardware em uso.
-
-**Solução:** Siga o [procedimento de calibração](#24-calibração-do-sensor-de-solo-obrigatória). Cada par sensor/placa tem variação diferente de fábrica — os valores padrão (1020/410) são apenas um ponto de partida.
-
----
-
-### ❓ O DHT11 exibe "Falha na leitura" frequentemente
-
-**Causas possíveis:**
-
-1. Cabo entre Arduino e DHT11 comprido demais (>50 cm sem resistor pull-up).
-2. `delay(2000)` foi reduzido abaixo de 2 segundos.
-3. Alimentação instável (3.3V em vez de 5V).
-4. Sensor com defeito ou pinos invertidos.
-
-**Solução para cabo longo:** Adicione um resistor de 4.7 kΩ entre o pino DATA e o VCC do DHT11.
-
----
-
-### ❓ Posso usar DHT22 em vez de DHT11?
-
-Sim. Altere as duas linhas abaixo:
-
-```cpp
-#define DHTPIN  2
-#define DHTTYPE DHT22   // ← era DHT11
-```
-
-O DHT22 oferece maior precisão (±0.5°C vs ±2°C) e permite leituras a cada segundo (vs 2 segundos no DHT11). Neste caso, o `delay(2000)` pode ser reduzido para `delay(1000)`.
-
----
-
-### ❓ O BH1750 retorna `0 lx` mesmo com luz ambiente
-
-**Causa:** O módulo GY-30 pode estar com o jumper `ADDR` solto, resultando em endereço I2C `0x5C` em vez de `0x23` (padrão da biblioteca).
-
-**Solução:** Especifique o endereço na inicialização:
+O endereço padrão costuma ser `0x23`. Alguns módulos podem usar `0x5C` de acordo com a configuração do pino `ADDR`.
 
 ```cpp
 lightMeter.begin(BH1750::CONTINUOUS_HIGH_RES_MODE, 0x5C);
 ```
 
----
+### 8.10 O sensor de solo permanece em 0% ou 100%
 
-## 6. Solução de Problemas
-
-### 🔴 "Falha ao inicializar a tela OLED" — código travado
-
-**Sintomas:** O LED do Arduino pisca uma vez e o código não prossegue.
-
-**Checklist:**
-- [ ] Cabos SDA/SCL conectados corretamente (A4=SDA, A5=SCL)?
-- [ ] Display alimentado em 3.3V ou 5V conforme especificação do módulo?
-- [ ] Endereço I2C correto? (execute o scanner I2C descrito acima)
-- [ ] Outro dispositivo I2C em conflito de endereço? (improvável com OLED+BH1750)
+Leia `soloRaw` e refaça a calibração. O `constrain()` limita a saída visual, mas não corrige referências de calibração inadequadas.
 
 ---
 
-### 🟡 "Erro ao inicializar o GY-30" — execução continua mas sem luminosidade
+## 9. Solução de problemas
 
-**Sintomas:** Serial exibe `"Erro ao inicializar o GY-30."`, display mostra `0 lx`.
+### 9.1 Wi-Fi não conecta
 
-**Checklist:**
-- [ ] O GY-30 compartilha os mesmos fios SDA/SCL do OLED?
-- [ ] Alimentação: o módulo aceita 3.3V ou 5V?
-- [ ] Tente `lightMeter.begin(BH1750::CONTINUOUS_HIGH_RES_MODE, 0x5C)`.
+Checklist:
 
----
+- [ ] SSID e senha estão corretos?
+- [ ] A rede opera em faixa compatível com a placa?
+- [ ] O sinal está suficientemente forte?
+- [ ] O firmware do módulo de conectividade da placa está atualizado?
+- [ ] A rede exige página de autenticação, cadastro ou login institucional?
+- [ ] O roteador bloqueia novos dispositivos ou clientes IoT?
 
-### 🟡 Leituras do DHT11 sempre 0.0°C e 0.0%
+Redes com portal cativo não funcionam apenas com SSID e senha no firmware.
 
-**Sintomas:** Nenhuma mensagem de erro visível no display, mas valores são sempre zero.
+### 9.2 MQTT não conecta
 
-**Causa:** O tratamento de erro atual substitui valores inválidos por `0` silenciosamente.
+Checklist:
 
-**Diagnóstico:** Abra o Monitor Serial. Se aparecer `"Falha na leitura do sensor DHT11!"` repetidamente, o sensor não está sendo lido corretamente. Siga as dicas da [FAQ acima](#-o-dht11-exibe-falha-na-leitura-frequentemente).
+- [ ] O Wi-Fi está conectado?
+- [ ] O host é `broker.hivemq.com`?
+- [ ] A porta é `1883`?
+- [ ] O `MQTT_CLIENT_ID` é único?
+- [ ] A rede permite saída pela porta MQTT?
+- [ ] O broker público está acessível naquele momento?
 
----
+O valor retornado por `mqttClient.state()` ajuda no diagnóstico. Registre o código exibido no Serial antes de alterar diversas partes do firmware simultaneamente.
 
-### 🟡 Umidade do solo com valores negativos ou acima de 100%
+### 9.3 MQTT conecta, mas a publicação falha
 
-**Sintomas:** O `constrain()` esconde o problema, mas o valor bruto no Serial indica leitura fora da faixa.
+Possíveis causas:
 
-**Causa:** Sensor inserido em solo mais úmido do que a referência de calibração (copo de água), ou sensor danificado.
+- buffer menor que o payload;
+- sessão caiu entre a leitura e a publicação;
+- tópico incorreto;
+- problema temporário de rede;
+- crescimento excessivo do JSON após novas funcionalidades.
 
-**Solução:** Recalibre com o solo mais úmido que você espera encontrar como referência `VALOR_UMIDO`.
-
----
-
-### 🟡 Display com texto cortado ou deslocado
-
-**Sintomas:** Última linha de dados não aparece no OLED.
-
-**Causa:** O display SSD1306 de 128×64 com fonte tamanho 1 comporta no máximo **8 linhas de texto** (8 px por linha). O layout atual usa 6 linhas com espaçamento, mas `setCursor` mal calculado pode causar overflow.
-
-**Solução:** Verifique as coordenadas Y em `setCursor(x, y)`. Cada linha de texto ocupa 8 pixels. A linha mais baixa visível começa em `y = 56`.
-
----
-
-## 7. Sugestões de Melhoria para Contribuidores
-
-As observações abaixo foram identificadas durante a documentação deste código. Elas não são bloqueantes, mas tornariam o projeto mais robusto e legível:
-
-### 7.1 Nomenclatura inconsistente (mistura de português e inglês)
-
-Variáveis como `lux`, `soloRaw` e `SOIL_PIN` misturam inglês com `umidadeAr`, `tempAr` e `VALOR_SECO` em português. Para um projeto de ciência cidadã voltado a educadores brasileiros, recomenda-se padronizar tudo em português:
+O firmware configura:
 
 ```cpp
-// Atual (misto):
-float lux = lightMeter.readLightLevel();
-int   soloRaw = analogRead(SOIL_PIN);
-
-// Sugerido (consistente):
-float luminosidade = lightMeter.readLightLevel();
-int   leituraBrutaSolo = analogRead(PINO_SOLO);
+mqttClient.setBufferSize(256);
 ```
 
-### 7.2 Tratamento de erro silencioso no DHT11
+Aumente esse valor caso o JSON seja ampliado.
 
-Substituir valores inválidos por `0` sem aviso visual no display pode passar despercebido. Sugestão:
+### 9.4 Dados congelados no dashboard
+
+Verifique se o dashboard está mostrando apenas a mensagem retida. Confirme no Monitor Serial se novas publicações continuam ocorrendo e se o consumidor está atualizando a interface a cada mensagem.
+
+Também confira se o intervalo foi aumentado inadvertidamente para vários minutos.
+
+### 9.5 Leituras inválidas contaminando gráficos
+
+O firmware atual publica `null`, mas o pipeline de dados precisa preservar esse valor. Algumas ferramentas podem converter `null` em zero durante transformações, importações CSV ou preenchimentos automáticos. Configure o sistema consumidor para armazenar dado ausente como ausente.
+
+### 9.6 Texto cortado no OLED
+
+O display de 128×64 com fonte padrão possui espaço vertical limitado. A linha de status MQTT ocupa a região inferior. Ao adicionar novas informações, ajuste cuidadosamente os valores de `setCursor(x, y)` ou implemente alternância de páginas.
+
+---
+
+## 10. Boas práticas e melhorias futuras
+
+### 10.1 Separar credenciais do código
+
+Crie um arquivo não versionado:
 
 ```cpp
-if (isnan(umidadeAr) || isnan(tempAr)) {
-    display.print("Temp: ERRO");  // Em vez de mostrar 0.0
-    Serial.println(F("Falha na leitura do sensor DHT11!"));
-    return;  // Pula atualização do display para este ciclo
+// arduino_secrets.h
+#define SECRET_SSID "nome-da-rede"
+#define SECRET_PASS "senha-da-rede"
+```
+
+No firmware:
+
+```cpp
+#include "arduino_secrets.h"
+
+const char* WIFI_SSID = SECRET_SSID;
+const char* WIFI_PASSWORD = SECRET_PASS;
+```
+
+Adicione `arduino_secrets.h` ao `.gitignore`.
+
+### 10.2 Usar broker privado, autenticação e TLS
+
+O broker público é adequado para experimentação. Em produção, utilize:
+
+- usuário e senha por dispositivo ou grupo;
+- TLS;
+- políticas de autorização por tópico;
+- logs de conexão;
+- limites de publicação;
+- política de retenção e backup.
+
+### 10.3 Adicionar timestamp
+
+O payload atual não informa quando a medida foi produzida. Para séries temporais confiáveis, adicione um timestamp obtido por RTC ou sincronização de rede.
+
+Exemplo conceitual:
+
+```json
+{
+  "timestamp": "2026-07-30T09:45:00-03:00",
+  "temperatura_ar_c": 24.7,
+  "umidade_ar_pct": 61.3,
+  "umidade_solo_pct": 52,
+  "umidade_solo_raw": 702,
+  "luminosidade_lux": 1384.0
 }
 ```
 
-### 7.3 Ausência de timestamp nas leituras
+### 10.4 Publicar estado de disponibilidade
 
-Para uso científico, cada leitura deveria ter um registro de tempo. Como o Arduino R4 possui RTC interno, é possível adicionar data/hora ao log serial sem hardware adicional:
+Uma evolução natural é adotar um tópico de estado:
 
-```cpp
-#include "RTC.h"  // Disponível no Arduino UNO R4
-// Permite registrar: "2024-06-01 14:32:05,TEMP:24.5,..."
+```text
+rede-ciencia-cidada/santo-andre/estacao-001/status
 ```
+
+Com mensagens como `online` e `offline`, incluindo Last Will and Testament do MQTT. Isso permite diferenciar uma estação sem variação ambiental de uma estação desconectada.
+
+### 10.5 Implementar buffer offline
+
+Atualmente, uma leitura produzida sem conexão MQTT é perdida. Para campanhas científicas, considere armazenar temporariamente os dados em memória, cartão SD ou outro meio e reenviá-los após a reconexão.
+
+### 10.6 Separar intervalos
+
+Use temporizadores independentes para:
+
+- aquisição dos sensores;
+- atualização do OLED;
+- publicação MQTT;
+- armazenamento local;
+- envio de diagnóstico.
+
+Essa separação permite preservar uma interface local responsiva enquanto reduz tráfego e volume de dados.
+
+### 10.7 Evitar fragmentação de memória
+
+O firmware atual usa `String` para montar o JSON, com `reserve(200)` para reduzir realocações. Em versões maiores ou de longa duração, considere um buffer de caracteres com `snprintf()` ou uma biblioteca JSON dimensionada adequadamente.
+
+### 10.8 Identificação e metadados
+
+Além do tópico, uma rede de ciência cidadã pode registrar:
+
+- ID persistente da estação;
+- versão do firmware;
+- modelo e versão dos sensores;
+- data de calibração;
+- localização em nível adequado de privacidade;
+- responsável técnico;
+- qualidade do sinal Wi-Fi;
+- tensão de alimentação;
+- código de erro ou status dos sensores.
+
+### 10.9 Qualidade científica dos dados
+
+A conectividade não transforma automaticamente um sensor de baixo custo em instrumento científico. Para uso comparativo, documente:
+
+- protocolo de instalação;
+- abrigo e exposição dos sensores;
+- altura e posição da estação;
+- frequência de amostragem;
+- calibração e substituição de componentes;
+- critérios de exclusão de dados;
+- períodos de indisponibilidade;
+- transformações realizadas no pipeline.
+
+A força do projeto está na combinação entre instrumentação acessível, transparência metodológica e interpretação crítica dos dados.
 
 ---
 
-*Documentação gerada para contribuidores do projeto Rede Ciência Cidadã — Parque Tecnológico de Santo André.*
+*Documentação atualizada para a versão do CuruMaker com Arduino UNO R4 WiFi, publicação MQTT e broker HiveMQ de desenvolvimento.*
